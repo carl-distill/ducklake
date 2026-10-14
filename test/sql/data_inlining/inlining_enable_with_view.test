@@ -1,0 +1,27 @@
+# name: test/sql/data_inlining/inlining_enable_with_view.test
+# description: Enabling data inlining validates tables while ignoring views in the shared catalog set
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/ducklake.db' AS lake (DATA_PATH '__TEST_DIR__/data', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE lake.t (i INTEGER)
+
+statement ok
+CREATE VIEW lake.v AS SELECT i FROM lake.t
+
+statement ok
+CALL lake.set_option('data_inlining_row_limit', 10)
+
+statement ok
+INSERT INTO lake.t VALUES (42)
+
+query I
+SELECT * FROM lake.v
+----
+42

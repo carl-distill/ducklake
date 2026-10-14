@@ -21,6 +21,10 @@ static void ValidateTableScope(ClientContext &context, Catalog &catalog, const s
 static void ValidateTablesInSchema(ClientContext &context, DuckLakeCatalog &duck_catalog,
                                    DuckLakeSchemaEntry &schema_entry, SchemaIndex override_scope_id) {
 	schema_entry.Scan(context, CatalogType::TABLE_ENTRY, [&](CatalogEntry &entry) {
+		// DuckLake 1.5 stores tables and views in one catalog set, so a table scan can emit views.
+		if (entry.type != CatalogType::TABLE_ENTRY) {
+			return;
+		}
 		auto &ducklake_table = entry.Cast<DuckLakeTableEntry>();
 		string override_val;
 		if (duck_catalog.TryGetScopedConfigOption("data_inlining_row_limit", override_val, override_scope_id,
