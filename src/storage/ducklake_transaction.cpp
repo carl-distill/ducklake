@@ -807,7 +807,7 @@ case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> &DuckLakeTransaction::Get
 
 bool DuckLakeTransaction::ChangesMade() const {
 	return state->SchemaChangesMade() || state->local_changes.HasChanges() || !state->dropped_files.empty() ||
-	       !new_name_maps.name_maps.empty();
+	       !state->tables_deleted_from.empty() || !new_name_maps.name_maps.empty();
 }
 
 bool DuckLakeTransaction::SchemaChangesMade() const {
@@ -1613,6 +1613,17 @@ void DuckLakeTransaction::AppendFiles(TableIndex table_id, vector<DuckLakeDataFi
 		return;
 	}
 	state->local_changes.AppendFiles(table_id, std::move(files));
+}
+
+void DuckLakeTransaction::RequireUnchangedTable(TableIndex table_id) {
+	if (table_id.IsTransactionLocal()) {
+		return;
+	}
+	// Guarded publication is a logical range replacement even when DELETE matched
+	// no rows. Retain that intent in the existing table-delete conflict class so
+	// concurrent inserts cannot introduce keys absent from the prepared snapshot.
+	// https://ducklake.select/docs/stable/duckdb/advanced_features/conflict_resolution
+	state->tables_deleted_from.insert(table_id);
 }
 
 void DuckLakeTransaction::AppendInlinedData(TableIndex table_id, unique_ptr<DuckLakeInlinedData> new_data) {

@@ -25,6 +25,7 @@ struct DuckLakeAddDataFilesData : public TableFunctionData {
 	vector<string> globs;
 	bool allow_missing = false;
 	bool ignore_extra_columns = false;
+	bool require_table_unchanged = false;
 	HivePartitioningType hive_partitioning = HivePartitioningType::AUTOMATIC;
 };
 
@@ -65,6 +66,8 @@ static unique_ptr<FunctionData> DuckLakeAddDataFilesBind(ClientContext &context,
 			result->allow_missing = BooleanValue::Get(entry.second);
 		} else if (lower == "ignore_extra_columns") {
 			result->ignore_extra_columns = BooleanValue::Get(entry.second);
+		} else if (lower == "require_table_unchanged") {
+			result->require_table_unchanged = BooleanValue::Get(entry.second);
 		} else if (lower == "hive_partitioning") {
 			result->hive_partitioning =
 			    BooleanValue::Get(entry.second) ? HivePartitioningType::YES : HivePartitioningType::NO;
@@ -1291,6 +1294,9 @@ static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInp
 	}
 	DuckLakeFileProcessor processor(transaction, context, bind_data);
 	auto files_to_add = processor.AddFiles(bind_data.globs);
+	if (bind_data.require_table_unchanged) {
+		transaction.RequireUnchangedTable(bind_data.table.GetTableId());
+	}
 	// add the files
 	transaction.AppendFiles(bind_data.table.GetTableId(), std::move(files_to_add));
 	state.finished = true;
@@ -1304,6 +1310,7 @@ TableFunctionSet DuckLakeAddDataFilesFunction::GetFunctions() {
 		                       DuckLakeAddDataFilesExecute, DuckLakeAddDataFilesBind, DuckLakeAddDataFilesInit);
 		function.named_parameters["allow_missing"] = LogicalType::BOOLEAN;
 		function.named_parameters["ignore_extra_columns"] = LogicalType::BOOLEAN;
+		function.named_parameters["require_table_unchanged"] = LogicalType::BOOLEAN;
 		function.named_parameters["hive_partitioning"] = LogicalType::BOOLEAN;
 		function.named_parameters["schema"] = LogicalType::VARCHAR;
 		set.AddFunction(function);
