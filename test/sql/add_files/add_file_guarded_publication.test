@@ -1,0 +1,249 @@
+# name: test/sql/add_files/add_file_guarded_publication.test
+# description: guarded file publication conflicts with concurrent same-table writers including absent keys
+# group: [add_files]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/guarded/', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+SET immediate_transaction_mode=true
+
+statement ok
+CREATE TABLE ducklake.target(id INTEGER, version INTEGER)
+
+statement ok
+CREATE TABLE ducklake.receipts(id INTEGER)
+
+statement ok
+CREATE TABLE ducklake.unrelated(id INTEGER)
+
+statement ok
+COPY (SELECT 1 AS id, 1 AS version) TO '${DATA_PATH}/guard-source.parquet' (FORMAT PARQUET)
+
+# Snapshot sees an absent key. A later committed insert must invalidate publication.
+statement ok con1
+BEGIN
+
+query I con1
+SELECT count(*) FROM ducklake.target WHERE id=1
+----
+0
+
+statement ok con2
+INSERT INTO ducklake.target VALUES (1,2)
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target','${DATA_PATH}/guard-source.parquet',require_table_unchanged=>true)
+
+statement ok con1
+INSERT INTO ducklake.receipts VALUES (1)
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+query II
+SELECT * FROM ducklake.target
+----
+1	2
+
+query I
+SELECT count(*) FROM ducklake.receipts
+----
+0
+
+# A concurrent update of an observed version also invalidates publication.
+statement ok con1
+BEGIN
+
+query I con1
+SELECT version FROM ducklake.target WHERE id=1
+----
+2
+
+statement ok con2
+UPDATE ducklake.target SET version=20 WHERE id=1
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target','${DATA_PATH}/guard-source.parquet',require_table_unchanged=>true)
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+query I
+SELECT version FROM ducklake.target WHERE id=1
+----
+20
+
+# The reverse commit order must reject the ordinary insert too.
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+query I con2
+SELECT count(*) FROM ducklake.target
+----
+1
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target','${DATA_PATH}/guard-source.parquet',require_table_unchanged=>true)
+
+statement ok con2
+INSERT INTO ducklake.target VALUES (2,3)
+
+statement ok con1
+COMMIT
+
+statement error con2
+COMMIT
+----
+Transaction conflict
+
+query I
+SELECT count(*) FROM ducklake.target WHERE id=2
+----
+0
+
+# Empty file lists retain intent and receipt writes roll back on conflict.
+statement ok con1
+BEGIN
+
+query I con1
+SELECT count(*) FROM ducklake.target WHERE id=3
+----
+0
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target',[]::VARCHAR[],require_table_unchanged=>true)
+
+statement ok con1
+INSERT INTO ducklake.receipts VALUES (2)
+
+statement ok con2
+INSERT INTO ducklake.target VALUES (3,4)
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+query I
+SELECT count(*) FROM ducklake.receipts
+----
+0
+
+# An empty guard with no other mutation must still perform conflict checks.
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target',[]::VARCHAR[],require_table_unchanged=>true)
+
+statement ok con2
+INSERT INTO ducklake.target VALUES (4,5)
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+# Rollback discards the guard before the next ordinary append transaction.
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target',[]::VARCHAR[],require_table_unchanged=>true)
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target','${DATA_PATH}/guard-source.parquet')
+
+statement ok con2
+INSERT INTO ducklake.target VALUES (5,6)
+
+statement ok con1
+COMMIT
+
+# Unrelated table commits do not invalidate guarded publication.
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target',[]::VARCHAR[],require_table_unchanged=>true)
+
+statement ok con2
+INSERT INTO ducklake.unrelated VALUES (10)
+
+statement ok con1
+INSERT INTO ducklake.receipts VALUES (3)
+
+statement ok con1
+COMMIT
+
+query I
+SELECT * FROM ducklake.receipts
+----
+3
+
+# Default append is concurrent in the other commit order as well.
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','target','${DATA_PATH}/guard-source.parquet')
+
+statement ok con2
+INSERT INTO ducklake.target VALUES (6,7)
+
+statement ok con1
+COMMIT
+
+statement ok con2
+COMMIT
+
+# A table created in the same transaction has no prior shared version to guard.
+statement ok con1
+BEGIN
+
+statement ok con1
+CREATE TABLE ducklake.created(id INTEGER,version INTEGER)
+
+statement ok con1
+CALL ducklake_add_data_files('ducklake','created','${DATA_PATH}/guard-source.parquet',require_table_unchanged=>true)
+
+statement ok con1
+COMMIT
+
+query II
+SELECT * FROM ducklake.created
+----
+1	1
+
+query II rowsort
+SELECT * FROM ducklake.target WHERE id<>1
+----
+3	4
+4	5
+5	6
+6	7
